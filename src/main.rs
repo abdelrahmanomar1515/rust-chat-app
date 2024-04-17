@@ -10,6 +10,7 @@ use axum::{
 };
 use axum_extra::{headers, TypedHeader};
 use futures::{sink::SinkExt, stream::StreamExt};
+use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
@@ -19,12 +20,15 @@ use tower_http::{services::ServeDir, trace::TraceLayer};
 #[tokio::main]
 async fn main() {
     let room = Arc::new(Mutex::new(Room::new()));
+
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+
     let app = Router::new()
         .fallback_service(ServeDir::new("public"))
         .route("/ws", get(ws_handler))
         .with_state(room);
+
     axum::serve(listener, app.layer(TraceLayer::new_for_http()))
         .await
         .unwrap();
@@ -47,14 +51,17 @@ async fn ws_handler(
 }
 
 async fn handle_socket(socket: WebSocket, room: Arc<Mutex<Room>>) {
-    let (ch_send, mut ch_recv) = tokio::sync::mpsc::unbounded_channel::<MyMessage>();
+    let (user_send, mut user_recv) = tokio::sync::mpsc::unbounded_channel::<MyMessage>();
     let (mut socket_send, mut socket_recv) = socket.split();
     tokio::spawn(async move {
-        while let Some(msg) = ch_recv.recv().await {
+        while let Some(msg) = user_recv.recv().await {
             match msg {
                 MyMessage::NewMsg(msg) => {
                     socket_send
-                        .send(Message::Text(format!("newMsg, {msg}")))
+                        .send(Message::Text(
+                            serde_json::to_string(&MyMessage::NewMsg(msg))
+                                .expect("Failed to serialize MyMessage"),
+                        ))
                         .await
                         .expect("Failed to send");
                 }
@@ -62,31 +69,34 @@ async fn handle_socket(socket: WebSocket, room: Arc<Mutex<Room>>) {
             }
         }
     });
-    let user = User::new(ch_send);
+    let user = User::new(user_send);
     room.lock()
-        .expect("other thread panicked while holding loc")
+        .expect("other thread panicked while holding lock")
         .join_user(user);
-    loop {
-        match socket_recv
-            .next()
-            .await
-            .expect("empty message")
-            .expect("deserialize message")
-        {
-            Message::Text(msg_txt) => match MyMessage::from(msg_txt) {
-                MyMessage::NewMsg(new_msg_txt) => {
-                    println!("{:?}", new_msg_txt.clone());
-                    if let Ok(mut room) = room.as_ref().lock() {
-                        room.send(&MyMessage::NewMsg(new_msg_txt))
+    while let Some(msg) = socket_recv.next().await {
+        println!("{:?}", msg);
+        let msg = msg.expect("deserialize message");
+        match msg {
+            Message::Text(msg_txt) => {
+                println!("{:?}", &msg_txt);
+                match serde_json::from_str(&msg_txt).expect("deserialze MyMessage") {
+                    MyMessage::NewMsg(new_msg_txt) => {
+                        println!("{:?}", new_msg_txt);
+                        if let Ok(mut room) = room.as_ref().lock() {
+                            room.send(&MyMessage::NewMsg(new_msg_txt))
+                        }
+                    }
+                    MyMessage::UpdateUserList(s) => {
+                        println!("{:?}", s);
+                    }
+                    MyMessage::Unknown(msg) => {
+                        println!("{:?}", msg);
+                    }
+                    MyMessage::NewUser(user_info) => {
+                        println!("{:?}", user_info)
                     }
                 }
-                MyMessage::UpdateUserList(s) => {
-                    println!("{:?}", s);
-                }
-                MyMessage::Unknown(msg) => {
-                    println!("{:?}", msg);
-                }
-            },
+            }
             Message::Close(_) => {}
             _ => {}
         }
@@ -118,36 +128,34 @@ impl Room {
 
 struct User {
     send_ch: tokio::sync::mpsc::UnboundedSender<MyMessage>,
+    user_info: UserInfo,
 }
 impl User {
     fn new(chan: tokio::sync::mpsc::UnboundedSender<MyMessage>) -> Self {
-        Self { send_ch: chan }
+        Self {
+            send_ch: chan,
+            user_info: UserInfo {
+                name: String::from("test"),
+                room: String::from("test"),
+            },
+        }
     }
     fn send_msg(&self, msg: &MyMessage) {
-        if (self.send_ch.send(msg.clone())).is_ok() {
-            println!("sent msg: {:?}", msg.clone());
-        }
+        self.send_ch.send(msg.clone()).expect("send failed");
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", content = "content")]
 enum MyMessage {
     NewMsg(String),
+    NewUser(UserInfo),
     UpdateUserList(Vec<String>),
     Unknown(String),
 }
 
-impl From<String> for MyMessage {
-    fn from(value: String) -> Self {
-        if value.starts_with("msg,") {
-            return Self::NewMsg(
-                value
-                    .split_once("msg,")
-                    .expect("message starts with `msg`")
-                    .1
-                    .to_string(),
-            );
-        }
-        Self::Unknown(value)
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserInfo {
+    name: String,
+    room: String,
 }

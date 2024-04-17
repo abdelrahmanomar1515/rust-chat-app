@@ -1,13 +1,5 @@
 const socket = new WebSocket("ws://127.0.0.1:8080/ws");
 
-socket.addEventListener("open", function(event) {
-    socket.send("Hello Server!");
-});
-
-socket.addEventListener("message", function(event) {
-    console.log("Message from server ", event.data);
-});
-
 function scrollToBottom() {
     const messageList = jQuery("#message-list");
     const newMessage = messageList.children("li:last-child");
@@ -28,25 +20,19 @@ function scrollToBottom() {
 
 socket.addEventListener("open", function() {
     const params = jQuery.deparam(window.location.search);
-    // socket.send("join", params, function(err) {
-    //     if (err) {
-    //         alert(err);
-    //         window.location.href = "/";
-    //     } else {
-    //         console.log("no error");
-    //     }
-    // });
-    socket.send("Join please");
+
+    socket.send(JSON.stringify({ type: "newUser", content: params }));
 });
 
 socket.addEventListener("close", function() {
     console.log("disconnected");
 });
 
-socket.addEventListener("message", function(users) {
-    if (users.data.startsWith("updateUserList")) {
+socket.addEventListener("message", function(msg) {
+    const message = JSON.parse(msg.data);
+    if (message.type === "updateUserList") {
         let ol = jQuery("<ol></ol>");
-        for (let user of users) {
+        for (let user of msg) {
             ol.append(jQuery("<li></li>").text(user));
         }
         jQuery("#users").html(ol);
@@ -54,13 +40,13 @@ socket.addEventListener("message", function(users) {
 });
 
 socket.addEventListener("message", function(msg) {
-    if (msg.data.startsWith("newMsg,")) {
-        const formattedTime = moment().format("H:mm");
+    const message = JSON.parse(msg.data);
+    if (message.type === "newMsg") {
         const template = jQuery("#message-template").html();
         const html = Mustache.render(template, {
-            text: msg.data,
-            from: "test",
-            createdAt: formattedTime,
+            text: message.content,
+            from: message.from,
+            createdAt: message.timeStamp,
         });
         jQuery("#message-list").append(html);
         scrollToBottom();
@@ -70,6 +56,8 @@ socket.addEventListener("message", function(msg) {
 jQuery("#message-form").on("submit", (e) => {
     e.preventDefault();
     const messageTextbox = jQuery("#message-form-message");
-    socket.send(["msg", messageTextbox.val()]);
+    socket.send(
+        JSON.stringify({ type: "newMsg", content: messageTextbox.val() }),
+    );
     messageTextbox.val("");
 });
