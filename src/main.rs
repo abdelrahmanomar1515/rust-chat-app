@@ -8,7 +8,11 @@ use axum::{
     routing::get,
     Router,
 };
-use axum_extra::{headers, TypedHeader};
+use axum_extra::{
+    headers::{self},
+    TypedHeader,
+};
+use core::panic;
 use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -56,11 +60,14 @@ async fn handle_socket(socket: WebSocket, room: Arc<Mutex<Room>>) {
     tokio::spawn(async move {
         while let Some(msg) = user_recv.recv().await {
             match msg {
-                MyMessage::NewMsg(msg) => {
+                MyMessage::ReceivedMessage(msg) => {
                     socket_send
                         .send(Message::Text(
-                            serde_json::to_string(&MyMessage::NewMsg(msg))
-                                .expect("Failed to serialize MyMessage"),
+                            serde_json::to_string(&ChatMessage {
+                                text: msg,
+                                from: String::from("test"),
+                            })
+                            .expect("Failed to serialize MyMessage"),
                         ))
                         .await
                         .expect("Failed to send");
@@ -69,7 +76,21 @@ async fn handle_socket(socket: WebSocket, room: Arc<Mutex<Room>>) {
             }
         }
     });
-    let user = User::new(user_send);
+
+    let join_msg = socket_recv
+        .next()
+        .await
+        .expect("Should receive first message")
+        .expect("First message should deserialize");
+
+    let user_info: UserInfo = if let Message::Text(join_msg) = join_msg {
+        serde_json::from_str(&join_msg)
+            .expect("First message couldn't be deserialized into UserInfo")
+    } else {
+        panic!("First message isn't user info")
+    };
+    let user = User::new(user_send, user_info);
+
     room.lock()
         .expect("other thread panicked while holding lock")
         .join_user(user);
@@ -80,10 +101,10 @@ async fn handle_socket(socket: WebSocket, room: Arc<Mutex<Room>>) {
             Message::Text(msg_txt) => {
                 println!("{:?}", &msg_txt);
                 match serde_json::from_str(&msg_txt).expect("deserialze MyMessage") {
-                    MyMessage::NewMsg(new_msg_txt) => {
+                    MyMessage::ReceivedMessage(new_msg_txt) => {
                         println!("{:?}", new_msg_txt);
                         if let Ok(mut room) = room.as_ref().lock() {
-                            room.send(&MyMessage::NewMsg(new_msg_txt))
+                            room.send(&MyMessage::ReceivedMessage(new_msg_txt))
                         }
                     }
                     MyMessage::UpdateUserList(s) => {
@@ -92,8 +113,8 @@ async fn handle_socket(socket: WebSocket, room: Arc<Mutex<Room>>) {
                     MyMessage::Unknown(msg) => {
                         println!("{:?}", msg);
                     }
-                    MyMessage::NewUser(user_info) => {
-                        println!("{:?}", user_info)
+                    MyMessage::NewUser(_) => {
+                        panic!("User info changing after initialized");
                     }
                 }
             }
@@ -131,13 +152,10 @@ struct User {
     user_info: UserInfo,
 }
 impl User {
-    fn new(chan: tokio::sync::mpsc::UnboundedSender<MyMessage>) -> Self {
+    fn new(chan: tokio::sync::mpsc::UnboundedSender<MyMessage>, user_info: UserInfo) -> Self {
         Self {
             send_ch: chan,
-            user_info: UserInfo {
-                name: String::from("test"),
-                room: String::from("test"),
-            },
+            user_info,
         }
     }
     fn send_msg(&self, msg: &MyMessage) {
@@ -148,7 +166,7 @@ impl User {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", content = "content")]
 enum MyMessage {
-    NewMsg(String),
+    ReceivedMessage(String),
     NewUser(UserInfo),
     UpdateUserList(Vec<String>),
     Unknown(String),
@@ -158,4 +176,10 @@ enum MyMessage {
 struct UserInfo {
     name: String,
     room: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ChatMessage {
+    text: String,
+    from: String,
 }

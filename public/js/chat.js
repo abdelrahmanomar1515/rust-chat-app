@@ -21,7 +21,7 @@ function scrollToBottom() {
 socket.addEventListener("open", function() {
     const params = jQuery.deparam(window.location.search);
 
-    socket.send(JSON.stringify({ type: "newUser", content: params }));
+    socket.send(JSON.stringify(params));
 });
 
 socket.addEventListener("close", function() {
@@ -41,10 +41,10 @@ socket.addEventListener("message", function(msg) {
 
 socket.addEventListener("message", function(msg) {
     const message = JSON.parse(msg.data);
-    if (message.type === "newMsg") {
+    if (message.text) {
         const template = jQuery("#message-template").html();
         const html = Mustache.render(template, {
-            text: message.content,
+            text: message.text,
             from: message.from,
             createdAt: message.timeStamp,
         });
@@ -57,7 +57,7 @@ jQuery("#message-form").on("submit", (e) => {
     e.preventDefault();
     const messageTextbox = jQuery("#message-form-message");
     socket.send(
-        JSON.stringify({ type: "newMsg", content: messageTextbox.val() }),
+        JSON.stringify({ type: "receivedMessage", content: messageTextbox.val() }),
     );
     messageTextbox.val("");
 });
